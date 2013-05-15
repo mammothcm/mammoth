@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+    <meta charset='utf-8' />
+    <meta http-equiv="X-UA-Compatible" content="chrome=1" />
+    <meta name="description" content="Mammoth : Mammoth is based on Hadoop. In mammoth tasks(map or reduce) in each node is executed in a single jvm in multi-thread way.Through global resource management, mammoth gained 30%-500% better performance than Hadoop." />
+
+    <link rel="stylesheet" type="text/css" media="screen" href="stylesheets/stylesheet.css">
+
+    <title>Mammoth</title>
+  </head>
+
+  <body>
+
+    <!-- HEADER -->
+    <div id="header_wrap" class="outer">
+        <header class="inner">
+          <a id="forkme_banner" href="https://github.com/mammothcm/mammoth">View on GitHub</a>
+
+          <h1 id="project_title">Mammoth</h1>
+          <h2 id="project_tagline">Mammoth is based on Hadoop. In mammoth tasks(map or reduce) in each node is executed in a single jvm in multi-thread way.Through global resource management, mammoth gained 30%-500% better performance than Hadoop.</h2>
+
+            <section id="downloads">
+              <a class="zip_download_link" href="https://github.com/mammothcm/mammoth/zipball/master">Download this project as a .zip file</a>
+              <a class="tar_download_link" href="https://github.com/mammothcm/mammoth/tarball/master">Download this project as a tar.gz file</a>
+            </section>
+        </header>
+    </div>
+
+    <!-- MAIN CONTENT -->
+    <div id="main_content_wrap" class="outer">
+      <section id="main_content" class="inner">
+        <p>How to use: 
+Mammoth is based on hadoop. About how to use hadoop, you can refer to <a href="http://hadoop.apache.org/">http://hadoop.apache.org/</a>. 
+In the following part of this document, we assume you are familiar with hadoop.
+You can just replace the "hadoop-core-1.0.1.jar" under HADOOP_HOME with the compiled "hadoop-core-1.0.1-mammoth.jar".
+After that you can use mammoth just in the way like hadoop.
+Mammoth is developed with 64-bit jdk7, and you are suggested to use the same.
+You must specify the child jvm options before running your job, eg:
+mapred.job.child.java.opts-d64 -Xmx8000M -Xms8000M</p>
+      </section>
+    </div>
+
+    <!-- FOOTER  -->
+    <div id="footer_wrap" class="outer">
+      <footer class="inner">
+        <p class="copyright">Mammoth maintained by <a href="https://github.com/mammothcm">mammothcm</a></p>
+        <p>Published with <a href="http://pages.github.com">GitHub Pages</a></p>
+      </footer>
+    </div>
+
+    
+
+  </body>
+</html>
