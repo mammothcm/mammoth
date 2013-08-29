@@ -9,3 +9,4 @@ You must specify the child jvm options before running your job, eg:
    <name>mapred.job.child.java.opts</name>
    <value>-d64 -Xmx8000M -Xms8000M</value>
 </property>
+You can learn more about the Mammoth on the page: http://grid.hust.edu.cn/xhshi/projects/mammoth.htm .
