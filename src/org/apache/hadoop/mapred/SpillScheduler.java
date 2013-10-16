@@ -16,12 +16,18 @@ import org.apache.hadoop.mapred.CachePool.CacheUnit;
 import org.apache.hadoop.util.StringUtils;
 
 public class SpillScheduler extends Thread {	
+	public static final int RECEIVE=0;
+	public static final int SEND=1;
+	public static final int SORT=2;
+	
 	private static final Log LOG = LogFactory.getLog(SpillScheduler.class.getName());
 	class SpillFile{
+		int priority;
 		boolean finished;
 		List<CacheUnit> cus;		
 		SpillThread spillThread;
-		SpillFile(SpillThread st) {
+		SpillFile(SpillThread st, int prio) {
+			priority = prio;
 			spillThread = st;
 			finished = false;
 			cus = new LinkedList<CacheUnit>();
@@ -61,6 +67,9 @@ public class SpillScheduler extends Thread {
 	class SpillThread extends Thread {
 		Map<OutputStream, SpillFile> files = new ConcurrentHashMap<OutputStream, SpillFile>();		
 		boolean stop = false;		
+		int maxPriority = -1;
+		boolean spilled = false;
+		int round = 0;
 		AtomicInteger toSpillSize = new AtomicInteger(0);
 		OutputStream currentOs = null;
 		private RoundQueue<OutputStream> spillIndeces =   //for schedule task to spill
@@ -90,12 +99,13 @@ public class SpillScheduler extends Thread {
 			} 
 		}
 		
-		public void registerSpill(OutputStream out) {
+		public void registerSpill(OutputStream out, int priority) {
 			if (files.containsKey(out)) {
 				LOG.info(" out contained already");
 				return;
 			} else {				
-				files.put(out, new SpillFile(this));
+				
+				files.put(out, new SpillFile(this, priority));
 				spillIndeces.insert(out);				
 			}
 		}
@@ -118,6 +128,14 @@ public class SpillScheduler extends Thread {
 			
 			while (toSpillSize.get() > 0) {
 				OutputStream out = spillIndeces.getNext();
+				round++;
+				if (round >= spillIndeces.size()) {
+					if (!spilled) {
+						maxPriority = -1;						
+					}
+					spilled = false;
+					round = 0;
+				}
 				if (out == null) {
 					return null;
 				}
@@ -149,6 +167,12 @@ public class SpillScheduler extends Thread {
 						continue;
 					}					
 					SpillFile sf = files.get(currentOs);		
+					if (sf.priority < maxPriority) {
+						continue;
+					}	else {						
+						maxPriority =sf.priority;
+						spilled = true;
+					}
 					CacheUnit cu = sf.getNext();
 					cu.writeFile(currentOs);					
 					if (cu.isLast()) {						
@@ -234,7 +258,7 @@ public class SpillScheduler extends Thread {
 			}
 		}
 	}
-	public  synchronized void registerSpill(OutputStream out) {
+	public  synchronized void registerSpill(OutputStream out, int priority) {
 		int min = spillThreads[0].files.size();
 		int ind = 0;
 	//	test();
@@ -245,7 +269,7 @@ public class SpillScheduler extends Thread {
 				ind =i;
 			}
 		}			
-		spillThreads[ind].registerSpill(out);
+		spillThreads[ind].registerSpill(out, priority);
 		this.file2Threads.put(out, new Integer(ind));
 	}
 	public synchronized void unRegisterSpill(OutputStream out) {

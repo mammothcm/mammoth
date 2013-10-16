@@ -401,7 +401,7 @@ public class DefaultJvmMemoryManager{
 			//The output stream for the final single output file
 			FSDataOutputStream finalFileOut = rfs.create(finalOutputFile, true, 4096);
 			long cfCap =  CacheFile.size2Cap(finalOutFileSize);
-			CacheFile finalCf = new CacheFile(CachePool.get(), cfCap ,finalFileOut, true, taskId);			
+			CacheFile finalCf = new CacheFile(CachePool.get(), cfCap ,finalFileOut, true, taskId, SpillScheduler.SORT);			
 			FSDataOutputStream finalOut = new FSDataOutputStream(new CacheOutputStream(finalCf), null);
 			if (numSpills == 0) {
 				//	create dummy files

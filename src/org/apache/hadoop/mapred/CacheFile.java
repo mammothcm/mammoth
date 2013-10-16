@@ -32,13 +32,13 @@ public class CacheFile extends InputStream {
 	private long rlen = 0;
 	
 	public CacheFile(CachePool p, long rlength) throws IOException {
-		this(p, rlength, null, false, null);				
+		this(p, rlength, null, false, null, -1);		
 	}
 	public CacheFile(FSDataOutputStream out, boolean asyn) throws IOException {
-		this(CachePool.get(), DEFAULTRLENGTH, out, asyn, null);
+		this(CachePool.get(), DEFAULTRLENGTH, out, asyn, null, -1);
 	}
-	public CacheFile(CachePool p, long rlength, FSDataOutputStream out, boolean asyn, 
-			TaskAttemptID tid) throws IOException{
+	CacheFile(CachePool p, long rlength, FSDataOutputStream out, boolean asyn, 
+			TaskAttemptID tid, int priority) throws IOException{
 		if (rlength == DEFAULTRLENGTH) {
 			content = new ArrayList<CacheUnit>((int)(rlength / CacheUnit.cap) + 1);
 		} else {
@@ -53,7 +53,7 @@ public class CacheFile extends InputStream {
 			if (output == null) {
 				throw new IOException("asynchronized write outputstream null!");
 			}
-			SpillScheduler.get().registerSpill(output);
+			SpillScheduler.get().registerSpill(output, priority);
 		}
 	}
 	public synchronized void write(byte b[], int off, int length) throws CachePoolFullException, InterruptedException {

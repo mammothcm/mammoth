@@ -78,6 +78,7 @@ import org.apache.hadoop.mapred.IFile.*;
 import org.apache.hadoop.mapred.CachePool.CacheUnit;
 import org.apache.hadoop.mapred.ChildRamManager.BufType;
 import org.apache.hadoop.mapred.Merger.Segment;
+import org.apache.hadoop.mapred.ReduceTask.ReduceCopier.RawKVIteratorReader;
 import org.apache.hadoop.mapred.SortedRanges.SkipRangeIterator;
 import org.apache.hadoop.mapred.TaskTracker.TaskInProgress;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
@@ -447,10 +448,7 @@ class ReduceTask extends Task {
                     keyClass, valueClass);
     }
     rIter = null;
-    if (isKilled){
-    	ChildRamManager.get().unregister(reduceCopier.getRamManager());
-    	return;
-    }
+   
     ChildRamManager.get().unregister(reduceCopier.getRamManager());
     done(umbilical, reporter);
   }
@@ -1157,7 +1155,9 @@ class ReduceTask extends Task {
   		private boolean isSpilling = false;  	
   		  	
   		private float maxInMemPer; //used for merge2Disk;
-  		private long maxFullSize = 0;  //max mapoutput size in history
+  		//private long maxFullSize = 0;  //max mapoutput size in history
+  		private long hisFullSize = 0;  
+  		private long hisNumClosed = 0;
   		
       public ShuffleRamManager(ChildRamManager crm, Configuration conf) throws IOException {
       	this.crm = crm;
@@ -1244,11 +1244,12 @@ class ReduceTask extends Task {
       	}      		
       }
       boolean exceedMemLimit() {
-      	if (fullSize == 0 || this.maxFullSize == 0) {
+      	if (fullSize == 0 || this.hisNumClosed == 0) {
       		return false;
       	}      	
+      	long avgFullSize = this.hisFullSize / this.hisNumClosed;
       	long totalShuffleSize = this.get2CopyNum() * 
-      			this.maxFullSize + fullSize;     
+      			avgFullSize + fullSize;     
       	long max = maxSize;
       	mergeSig.isToMem = totalShuffleSize <= max;      	
       	if (!mergeSig.isToMem) {
@@ -1317,7 +1318,7 @@ class ReduceTask extends Task {
                    numPendingRequests < numRequiredMapOutputs))) ) {
             dataAvailable.wait(500);            
           }          
-          if (exceeded) {
+          if (exceeded || closed) {
           	mergeSig.isForced = false;
           } else {
           	mergeSig.isForced = true;
@@ -1335,9 +1336,8 @@ class ReduceTask extends Task {
 	      	++numClosed;	      	
 	  			fullSize += requestedSize;
 	  			if (isCopiedMap) {
-	  				if (maxFullSize < requestedSize) {
-	  					maxFullSize = requestedSize;
-	  				}
+	  				this.hisFullSize += requestedSize;
+		      	this.hisNumClosed++;
 	  			}
       	}
       	crm.closeInMemBuf(ChildRamManager.BufType.copy, requestedSize);
@@ -1907,7 +1907,7 @@ class ReduceTask extends Task {
             
             // Inform the ram-manager
          
-            ramManager.closeInMemoryFile(mapOutputLength, false);
+            ramManager.closeInMemoryFile(rlength, false);
             ramManager.unreserve(rlength);
            
             throw ioe;
@@ -1958,7 +1958,7 @@ class ReduceTask extends Task {
                    ioe);
 
           // Inform the ram-manager
-          ramManager.closeInMemoryFile(mapOutputLength, false);
+          ramManager.closeInMemoryFile(rlength, false);
           ramManager.unreserve(rlength);
           
           // Discard the map-output
@@ -1979,7 +1979,7 @@ class ReduceTask extends Task {
         }
 
         // Close the in-memory file
-        ramManager.closeInMemoryFile(mapOutputLength, true);
+        ramManager.closeInMemoryFile(rlength, true);
 
         // Sanity check
         if (bytesRead != mapOutputLength) {
@@ -2684,52 +2684,9 @@ class ReduceTask extends Task {
       final RawComparator<K> comparator =
         (RawComparator<K>)job.getOutputKeyComparator();
 
-      // segments required to vacate memory
-      List<Segment<K,V>> memDiskSegments = new ArrayList<Segment<K,V>>();
-      long inMemToDiskBytes = 0;
-      if (mapOutputsFilesInMemory.size() > 0) {
-        TaskID mapId = mapOutputsFilesInMemory.get(0).mapId;
-        inMemToDiskBytes = createInMemorySegments(memDiskSegments,
-            maxInMemReduce);
-        final int numMemDiskSegments = memDiskSegments.size();
-        if (numMemDiskSegments > 0 &&
-              ioSortFactor > mapOutputFilesOnDisk.size()) {
-          // must spill to disk, but can't retain in-mem for intermediate merge
-          final Path outputPath =
-              mapOutputFile.getInputFileForWrite(mapId, inMemToDiskBytes);
-          final RawKeyValueIterator rIter = Merger.merge(job, fs,
-              keyClass, valueClass, memDiskSegments, numMemDiskSegments,
-              tmpDir, comparator, reporter, spilledRecordsCounter, null);
-          final Writer writer = new Writer(job, fs, outputPath,
-              keyClass, valueClass, codec, null);
-          try {
-            Merger.writeFile(rIter, writer, reporter, job);
-            addToMapOutputFilesOnDisk(fs.getFileStatus(outputPath));
-          } catch (Exception e) {
-            if (null != outputPath) {
-              fs.delete(outputPath, true);
-            }
-            throw new IOException("Final merge failed", e);
-          } finally {
-            if (null != writer) {
-              writer.close();
-            }
-          }
-          LOG.info("Merged " + numMemDiskSegments + " segments, " +
-                   inMemToDiskBytes + " bytes to disk to satisfy " +
-                   "reduce memory limit");
-          inMemToDiskBytes = 0;          
-          memDiskSegments.clear();          
-        } else if (inMemToDiskBytes != 0) {
-          LOG.info("Keeping " + numMemDiskSegments + " segments, " +
-                   inMemToDiskBytes + " bytes in memory for " +
-                   "intermediate, on-disk merge");
-        }
-      }
-
       // segments on disk
       List<Segment<K,V>> diskSegments = new ArrayList<Segment<K,V>>();
-      long onDiskBytes = inMemToDiskBytes;
+      long onDiskBytes = 0;
       Path[] onDisk = getMapFiles(fs, false);
       for (Path file : onDisk) {
         onDiskBytes += fs.getFileStatus(file).getLen();
@@ -2752,12 +2709,10 @@ class ReduceTask extends Task {
       LOG.info("Merging " + finalSegments.size() + " segments, " +
                inMemBytes + " bytes from memory into reduce");
       if (0 != onDiskBytes) {
-        final int numInMemSegments = memDiskSegments.size();
-        diskSegments.addAll(0, memDiskSegments);
-        memDiskSegments.clear();
+
         RawKeyValueIterator diskMerge = Merger.merge(
             job, fs, keyClass, valueClass, codec, diskSegments,
-            ioSortFactor, numInMemSegments, tmpDir, comparator,
+            diskSegments.size(), 0, tmpDir, comparator,
             reporter, false, spilledRecordsCounter, null);
         diskSegments.clear();
         if (0 == finalSegments.size()) {
@@ -3024,7 +2979,7 @@ class ReduceTask extends Task {
 		        outputPath = mapOutputFile.getInputFileForWrite(mapId, mergeOutputSize);
 		        FSDataOutputStream finalFileOut = rfs.create(outputPath, true, 4096);
 		  			long cfCap =  CacheFile.size2Cap(mergeOutputSize);		  			
-		  			CacheFile finalCf = new CacheFile(CachePool.get(), cfCap ,finalFileOut, true, getTaskID());			
+		  			CacheFile finalCf = new CacheFile(CachePool.get(), cfCap ,finalFileOut, true, getTaskID(), SpillScheduler.RECEIVE);			
 		  			finalOut = new FSDataOutputStream(new CacheOutputStream(cf), null);		  			
 		        writer = new Writer(conf, finalOut,conf.getMapOutputKeyClass(),
                     conf.getMapOutputValueClass(), codec, null);		        
@@ -3037,7 +2992,8 @@ class ReduceTask extends Task {
       	}
       	if (ms.isToMem) {
       		long rlength = mergeOutputSize % CacheUnit.cap == 0 ? 
-      				mergeOutputSize : (mergeOutputSize / CacheUnit.cap + 1) * CacheUnit.cap; 
+      				mergeOutputSize : (mergeOutputSize / CacheUnit.cap + 1) * CacheUnit.cap;
+      		mergeOutputSize = rlength;
       		try {
 	      		ChildRamManager.get().getReserveLock().lock();
 	        	if (ChildRamManager.get().tryReserve(getTaskID(), BufType.copy, rlength)) {
