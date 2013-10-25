@@ -1,8 +1,9 @@
 How to use: 
-Mammoth is a memory-centric MapReduce based on hadoop-1.0.1 aiming to solve the problem of I/O bottleneck in data-intensive applications. About how to use hadoop, you can refer to its homepage: http://hadoop.apache.org/. 
+Mammoth is a memory-centric MapReduce based on hadoop-1.0.1 aiming to solve the problem of I/O bottleneck in 
+data-intensive applications. About how to use hadoop, you can refer to its homepage: http://hadoop.apache.org/. 
 In the following part of this document, we assume you are familiar with hadoop.
 You can just replace the "hadoop-core-1.0.1.jar" under $HADOOP_HOME with the compiled "hadoop-core-1.0.1-mammoth-0.9.0.jar".
-After that you can use mammoth just in the same way with hadoop.
+After that you can use mammoth just in the same way with original hadoop.
 Mammoth is developed with 64-bit jdk7, and you are suggested to use the same.
 You must specify the child jvm options before running your job, eg:
 <property>
