@@ -30,19 +30,26 @@ import java.util.Vector;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-
+import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapred.CleanupQueue.PathDeletionContext;
+import org.apache.hadoop.mapred.JvmManager.JvmManagerForType.JvmRunner;
 import org.apache.hadoop.mapred.TaskTracker.TaskInProgress;
 import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.mapreduce.server.tasktracker.JVMInfo;
 import org.apache.hadoop.mapreduce.server.tasktracker.userlogs.JvmFinishedEvent;
-
+import org.apache.hadoop.util.ProcessTree;
 import org.apache.hadoop.util.ProcessTree.Signal;
-
+import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 
 class JvmManager {
 
   public static final Log LOG =
     LogFactory.getLog("org.apache.hadoop.mapred.JvmManager");
+
+ // private JvmManagerForType mapJvmManager;
+
+ // private JvmManagerForType reduceJvmManager;
   
   private JvmManagerForType jobJvmManager;
   
@@ -53,14 +60,23 @@ class JvmManager {
   }
   
   public JvmManager(TaskTracker tracker) {
-
+  	/*
+    mapJvmManager = new JvmManagerForType(tracker.getMaxCurrentMapTasks(), 
+        true, tracker);
+    reduceJvmManager = new JvmManagerForType(tracker.getMaxCurrentReduceTasks(),
+        false, tracker);
+        */
   	jobJvmManager = new JvmManagerForType(tracker.getMaxCurrentMapTasks(), tracker.getMaxCurrentReduceTasks(),
        tracker);
   }
 
   //called from unit tests
   JvmManagerForType getJvmManagerForType(TaskType type) {
-
+ /*   if (type.equals(TaskType.MAP)) {
+      return mapJvmManager;
+    } else if (type.equals(TaskType.REDUCE)) {
+      return reduceJvmManager;
+    } */
     return null;
   }
   
@@ -68,7 +84,12 @@ class JvmManager {
    * Saves pid of the given taskJvm
    */
   void setPidToJvm(JVMId jvmId, String pid) {
-
+    /*if (jvmId.isMapJVM()) {
+      mapJvmManager.jvmIdToPid.put(jvmId, pid);
+    }
+    else {
+      reduceJvmManager.jvmIdToPid.put(jvmId, pid);
+    }*/
   	jobJvmManager.jvmIdToPid.put(jvmId, pid);
   }
   
@@ -77,7 +98,18 @@ class JvmManager {
    */
   String getPid(TaskRunner t) {
     if (t != null && t.getTask() != null) {
-
+   /*   if (t.getTask().isMapTask()) {
+        JVMId id = mapJvmManager.runningTaskToJvm.get(t);
+        if (id != null) {
+          return mapJvmManager.jvmIdToPid.get(id);
+        }
+      } else {
+        JVMId id = reduceJvmManager.runningTaskToJvm.get(t);
+        if (id != null) {
+          return reduceJvmManager.jvmIdToPid.get(id);
+        }
+      }
+      */
     	JVMId id = jobJvmManager.runningTaskToJvm.get(t);
       if (id != null) {
         return jobJvmManager.jvmIdToPid.get(id);
@@ -88,46 +120,79 @@ class JvmManager {
   
   
   public void stop() throws IOException, InterruptedException {
- 
+    /*mapJvmManager.stop();
+    reduceJvmManager.stop();
+    */
   	jobJvmManager.stop();
   }
 
   public boolean isJvmKnown(JVMId jvmId) {
-
+    /*if (jvmId.isMapJVM()) {
+      return mapJvmManager.isJvmknown(jvmId);
+    } else {
+      return reduceJvmManager.isJvmknown(jvmId);
+    }*/
   	return jobJvmManager.isJvmknown(jvmId);
   }
 
   public void launchJvm(TaskRunner t, JvmEnv env
                         ) throws IOException, InterruptedException {
-
+   /* if (t.getTask().isMapTask()) {
+      mapJvmManager.reapJvm(t, env);
+    } else {
+      reduceJvmManager.oldReapJvm(t, env);
+    }*/
   	jobJvmManager.reapJvm(t, env);
   }
 
   public boolean validateTipToJvm(TaskInProgress tip, JVMId jvmId) {
-
+    /*if (jvmId.isMapJVM()) {
+      return mapJvmManager.validateTipToJvm(tip, jvmId);
+    } else {
+      return reduceJvmManager.validateTipToJvm(tip, jvmId);
+    }*/
   	return jobJvmManager.validateTipToJvm(tip, jvmId);
   }
 
   public TaskInProgress getTaskForJvm(JVMId jvmId)
       throws IOException {
- 
+  	/*
+    if (jvmId.isMapJVM()) {
+      return mapJvmManager.getTaskForJvm(jvmId);
+    } else {
+      return reduceJvmManager.getTaskForJvm(jvmId);
+    }*/
   	return jobJvmManager.getTaskForJvm(jvmId);
   }
   public void taskFinished(TaskRunner tr) {
-
+  	/*
+    if (tr.getTask().isMapTask()) {
+      mapJvmManager.taskFinished(tr);
+    } else {
+      reduceJvmManager.taskFinished(tr);
+    }*/
   	jobJvmManager.taskFinished(tr);
   }
 
   public void taskKilled(TaskRunner tr
                          ) throws IOException, InterruptedException {
-
+    /*if (tr.getTask().isMapTask()) {
+      mapJvmManager.taskKilled(tr);
+    } else {
+      reduceJvmManager.taskKilled(tr);
+    }*/
   	
   	jobJvmManager.taskKilled(tr);
   }
 
   public void killJvm(JVMId jvmId) throws IOException, InterruptedException {
   	jobJvmManager.killJvm(jvmId);
-
+  	/*
+    if (jvmId.isMap) {
+      mapJvmManager.killJvm(jvmId);
+    } else {
+      reduceJvmManager.killJvm(jvmId);
+    }*/
   }  
 
   /**
@@ -169,7 +234,7 @@ class JvmManager {
     
     int maxMapJvms;
     int maxReduceJvms;
-
+    //boolean isMap;
     private final long sleeptimeBeforeSigkill;
     
     Random rand = new Random(System.currentTimeMillis());
@@ -180,9 +245,11 @@ class JvmManager {
     private TaskTracker tracker;
 
     public JvmManagerForType(int maxMJvms, int maxRJvms, 
-        TaskTracker tracker) {    
+        TaskTracker tracker) {
+      //this.maxJvms = maxJvms;
     	this.maxMapJvms = maxMJvms;
     	this.maxReduceJvms = maxRJvms;
+    //  this.isMap = isMap;
       this.tracker = tracker;
       sleeptimeBeforeSigkill =
         tracker.getJobConf().getLong(DELAY_BEFORE_KILL_KEY,
@@ -214,12 +281,34 @@ class JvmManager {
             return true;
           }
       }
-      return false; 
+      return false;
+      /*TaskRunner taskRunner = jvmToRunningTask.get(jvmId);
+      if (taskRunner == null) {
+        return false; //JvmId not known.
+      }
+      TaskInProgress knownTip = taskRunner.getTaskInProgress();
+      if (knownTip == tip) { // Valid to compare the addresses ? (or equals)
+        return true;
+      } else {
+        return false;
+      }*/
     }
 
     synchronized public TaskInProgress getTaskForJvm(JVMId jvmId)
         throws IOException {
-    
+      /*if (jvmToRunningTask.containsKey(jvmId)) {
+        //Incase of JVM reuse, tasks are returned to previously launched
+        //JVM via this method. However when a new task is launched
+        //the task being returned has to be initialized.
+    	  
+        TaskRunner taskRunner = jvmToRunningTask.get(jvmId);
+        JvmRunner jvmRunner = jvmIdToRunner.get(jvmId);
+        Task task = taskRunner.getTaskInProgress().getTask();
+
+        jvmRunner.taskGiven(task);
+        return taskRunner.getTaskInProgress();
+
+      }*/
       if (jvmToPendingTasks.containsKey(jvmId)) {
           //Incase of JVM reuse, tasks are returned to previously launched
           //JVM via this method. However when a new task is launched
@@ -274,6 +363,14 @@ class JvmManager {
       		list.remove(tr);
       	}
       }
+   /*   if (jvmId != null) {
+        jvmToRunningTasks.get(jvmId).remove(tr);
+        if (this.jvmToPendingTasks.get(jvmId).size() +
+        		this.jvmToRunningTasks.get(jvmId).size() == 0) {
+        	killJvm(jvmId);
+        }
+      }
+      */
     }
 
     synchronized public void killJvm(JVMId jvmId) throws IOException, 
@@ -318,7 +415,77 @@ class JvmManager {
 	    	}
 	    }    	
 	    return num;
-    }   
+    }
+    
+    private synchronized void oldReapJvm( 
+        TaskRunner t, JvmEnv env) throws IOException, InterruptedException {
+      if (t.getTaskInProgress().wasKilled()) {
+        //the task was killed in-flight
+        //no need to do the rest of the operations
+        return;
+      }
+      boolean spawnNewJvm = false;
+      JobID jobId = t.getTask().getJobID();
+      //Check whether there is a free slot to start a new JVM.
+      //,or, Kill a (idle) JVM and launch a new one
+      //When this method is called, we *must* 
+      // (1) spawn a new JVM (if we are below the max) 
+      // (2) find an idle JVM (that belongs to the same job), or,
+      // (3) kill an idle JVM (from a different job) 
+      // (the order of return is in the order above)
+      int numJvmsSpawned = getSpawnedJvmNum(t.getTask().isMapTask());
+      JvmRunner runnerToKill = null;
+      if ((t.getTask().isMapTask()&& numJvmsSpawned >= maxMapJvms) || 
+      		(t.getTask().isMapTask()&& numJvmsSpawned >= maxReduceJvms)) {
+        //go through the list of JVMs for all jobs.
+        Iterator<Map.Entry<JVMId, JvmRunner>> jvmIter = 
+          jvmIdToRunner.entrySet().iterator();
+        
+        while (jvmIter.hasNext()) {
+          JvmRunner jvmRunner = jvmIter.next().getValue();
+          JobID jId = jvmRunner.jvmId.getJobId();
+          //look for a free JVM for this job; if one exists then just break
+          if (jId.equals(jobId) && !jvmRunner.isBusy() && !jvmRunner.ranAll()){
+            setRunningTaskForJvm(jvmRunner.jvmId, t); //reserve the JVM
+            LOG.info("No new JVM spawned for jobId/taskid: " + 
+                     jobId+"/"+t.getTask().getTaskID() +
+                     ". Attempting to reuse: " + jvmRunner.jvmId);
+            return;
+          }
+          //Cases when a JVM is killed: 
+          // (1) the JVM under consideration belongs to the same job 
+          //     (passed in the argument). In this case, kill only when
+          //     the JVM ran all the tasks it was scheduled to run (in terms
+          //     of count).
+          // (2) the JVM under consideration belongs to a different job and is
+          //     currently not busy
+          //But in both the above cases, we see if we can assign the current
+          //task to an idle JVM (hence we continue the loop even on a match)
+          if ((jId.equals(jobId) && jvmRunner.ranAll()) ||
+              (!jId.equals(jobId) && !jvmRunner.isBusy())) {
+            runnerToKill = jvmRunner;
+            spawnNewJvm = true;
+          }
+        }
+      } else {
+        spawnNewJvm = true;
+      }
+
+      if (spawnNewJvm) {
+        if (runnerToKill != null) {
+          LOG.info("Killing JVM: " + runnerToKill.jvmId);
+          killJvmRunner(runnerToKill);
+        }
+        spawnNewJvm(jobId, env, t);
+        return;
+      }
+      //*MUST* never reach this
+      LOG.fatal("Inconsistent state!!! " +
+      		"JVM Manager reached an unstable state " +
+            "while reaping a JVM for task: " + t.getTask().getTaskID()+
+            " " + getDetails() + ". Aborting. ");
+      System.exit(-1);
+    }
     
     private synchronized void reapJvm( 
         TaskRunner t, JvmEnv env) throws IOException, InterruptedException {
@@ -326,9 +493,12 @@ class JvmManager {
         //the task was killed in-flight
         //no need to do the rest of the operations
         return;
-      }      
+      }
+      //boolean spawnNewJvm = false;
+      
       JobID jobId = t.getTask().getJobID();
       int numJvmsSpawned = getSpawnedJvmNum(t.getTask().isMapTask());
+      JvmRunner runnerToKill = null;
       if ((t.getTask().isMapTask()&& numJvmsSpawned < maxMapJvms) || 
       		(!t.getTask().isMapTask()&& numJvmsSpawned < maxReduceJvms)) {
 	      Iterator<Map.Entry<JVMId, JvmRunner>> jvmIter = 
@@ -427,12 +597,15 @@ class JvmManager {
       final int numTasksToRun;
       JVMId jvmId;
       volatile boolean busy = true;
+      private ShellCommandExecutor shexec; // shell terminal for running the task
       private Task firstTask;
 
       private List<Task> tasksGiven = new ArrayList<Task>();
 
+     // private List<Task> runningTasks = new ArrayList<Task>();
       void taskGiven(Task task) {
         tasksGiven.add(task);
+       // runningTasks.add(task);
       }
 
       public JvmRunner(JvmEnv env, JobID jobId, Task firstTask) {
@@ -556,7 +729,13 @@ class JvmManager {
       public void taskRan(Task task) {
         busy = false;
         numTasksRan++;
-      }      
+        //runningTasks.remove(task);
+      }
+      
+      //public int getRunningTasksNum() {
+    //	  return this.runningTasks.size();
+     // }
+      
       public boolean ranAll() {
         return(numTasksRan == numTasksToRun);
       }

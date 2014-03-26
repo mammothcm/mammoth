@@ -12,7 +12,8 @@ public class RoundQueue<T> {
 	private ReentrantLock lock;
 	private Segment last;
 	private Segment head;
-	private Segment ind;	
+	private Segment ind;
+	
 	private int size;
 	RoundQueue() {	
 		last = null;
@@ -29,8 +30,7 @@ public class RoundQueue<T> {
 				head = new Segment(t);
 				last = head;
 				last.next = head;
-				ind = head;
-		
+				ind = head;		
 				size++;				
 			} else {
 				last.next = new Segment(t);

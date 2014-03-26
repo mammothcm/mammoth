@@ -28,9 +28,16 @@ import java.net.URLClassLoader;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FSError;
@@ -38,6 +45,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalDirAllocator;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.ipc.RPC;
+
 import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
 import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
@@ -57,14 +65,23 @@ import org.apache.log4j.LogManager;
  * The main() for child processes. 
  */
 
-class Child {	
-	private List<JvmTask> pendingTasks = new ArrayList<JvmTask>();	
+class Child {
+	
+	//*******************memory management*********************
+	
+	
+	//************task manageMent*************************
+	
+	private List<JvmTask> pendingTasks = new ArrayList<JvmTask>();
+	
 	private static Map<TaskAttemptID, RunningTask> runningTasks = 
 			new ConcurrentHashMap<TaskAttemptID, RunningTask>();	
 	private static Map<TaskAttemptID, RunningTask> cleanupTasks = 
 			new ConcurrentHashMap<TaskAttemptID, RunningTask>();	
-	private GetNewTaskThread getNewTaskThread = new GetNewTaskThread();	
-  private LaunchTaskThread launchTaskThread = new LaunchTaskThread(); 
+	private GetNewTaskThread getNewTaskThread = new GetNewTaskThread();
+	
+  private LaunchTaskThread launchTaskThread = new LaunchTaskThread();
+  
 
   private static DefaultJvmMemoryManager jvmMemManager;
   
@@ -79,7 +96,7 @@ class Child {
 	public Child() {
 		try {
 		
-			jvmMemManager = new DefaultJvmMemoryManager();
+			jvmMemManager = new DefaultJvmMemoryManager(umbilical.getMaxCurrentMapTasks());
 		
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
@@ -88,6 +105,7 @@ class Child {
 	}
 	//private 
 	private class GetNewTaskThread extends Thread{
+		private static final long SLEEP_TIME = 1000;		
 		final int SLEEP_LONGER_COUNT = 5;
 		private boolean isEnded = false;
 		void end() {
@@ -104,9 +122,20 @@ class Child {
 						String tmp = "";
 						for(TaskAttemptID id : runningTasks.keySet()) {
 							tmp += (" " + id);
+							//Child.killTask(id);
 						}
 						LOG.info("jvm should die ,runningTasks : " + tmp);
-						System.exit(0);									
+						System.exit(0);						
+						/*while (runningTasks.size() > 0) {
+							synchronized (runningTasks) {
+								runningTasks.wait();
+							}
+						}
+						LOG.info("runningTasks waited");
+						synchronized(finishSignal) {
+							finishSignal.notifyAll();
+						}
+						break;*/
 					}
 		            
 					if (myTask.getTask() == null) {
@@ -119,7 +148,12 @@ class Child {
 						}
 						continue;
 					} else {
-				
+					/*
+						if(!(myTask.getTask().isMapTask())||(myTask.getTask().isMapTask()&&myTask.getTask().getPartition() > 7 && myTask.getTask().getPartition() <30)) {						
+							LOG.info("System.exit(0); " + myTask.getTask());
+							//System.exit(0);
+							continue;
+						}*/
 						if (runningTasks.containsKey(myTask.getTask().getTaskID())) {
 							if (myTask.getTask().isTaskCleanupTask()) {
 								killTask(myTask.getTask().getTaskID());
@@ -129,20 +163,20 @@ class Child {
 							
 							pendingTasks.add(myTask);
 							pendingTasks.notifyAll();
-							LOG.info("GetNewTask: " + myTask.getTask());
+							LOG.info("cm********** GetNewTask: " + myTask.getTask());
 							idleLoopCount = 0;
 						}
 					}					
 				} catch (InterruptedException e) {
 					// TODO Auto-generated catch block					
 					this.isEnded = true;
-
+					LOG.info("System.exit(31)");
 					System.exit(31);
 					continue;		
 				} catch (IOException e) {
 					// TODO Auto-generated catch block
 					this.isEnded = true;
-
+					LOG.info("System.exit(30)");
 					System.exit(30);
 					continue;					
 				} 
@@ -181,7 +215,7 @@ class Child {
 					if (rt.initialize()) {
 						rt.setName(task.getTaskID()+"");		
 						rt.start();
-						LOG.info("LaunchNewTask: " + myTask.getTask());
+						LOG.info("cm********** LaunchNewTask: " + myTask.getTask());
 					}
 					
 				}
@@ -315,7 +349,7 @@ class Child {
 						e.printStackTrace();
 					}
 				}
-				LOG.info("initializeTask failed : " + task);
+				LOG.info("cm********** initializeTask failed : " + task);
 				taskEnd();
 				return false;
 			}
@@ -323,7 +357,7 @@ class Child {
 		}
 		
 		public void taskEnd() {
-			LOG.info("task end : " + task);
+			LOG.info("cm********** task end : " + task);
 			if (task.isTaskCleanupTask()) {
 				cleanupTasks.remove(taskid);
 			} else { 
@@ -374,18 +408,19 @@ class Child {
 							// use job-specified working directory
 							FileSystem.get(job).setWorkingDirectory(job.getWorkingDirectory());
 							if (taskFinal.isMapTask()) {
+								LOG.info("taskFinal  ::::  " + taskFinal);
 								if (jvmMemManager.getConf() == null) {
 									jvmMemManager.setConf(job);
 								}
 								taskFinal.setJvmMemManager(jvmMemManager);
 							}
-							if (taskFinal.isTaskCleanupTask() && runningTasks.containsKey(taskFinal.getTaskID())) {
-								synchronized(this) {
-									this.wait();
+							while (taskFinal.isTaskCleanupTask() && runningTasks.containsKey(taskFinal.getTaskID())) {
+								synchronized(runningTasks) {
+									runningTasks.wait(500);
 								}
 							}
 							taskFinal.run(job, umbilical);        // run the task
-							LOG.info("task ran : " + taskFinal);
+							LOG.info("cm ******** task ran : " + taskFinal);
 						} finally {
 							if (task.isKilled) {
 								return null;
@@ -455,9 +490,11 @@ class Child {
 								e.printStackTrace();
 							}
 				}
-			}	finally {				
+			}
+			finally {				
 				taskEnd();
-				t.interrupt();	
+				t.interrupt();
+				return;
 			}
 		}
 		
@@ -482,7 +519,9 @@ class Child {
   	this.launchTaskThread.end();
   	this.getNewTaskThread.end();
   }
-  public static void main(String[] args) throws Throwable {    
+  public static void main(String[] args) throws Throwable {
+    LOG.debug("Child starting");
+    
     String host = args[0];
     int port = Integer.parseInt(args[1]);
     final InetSocketAddress address = NetUtils.makeSocketAddr(host, port);
@@ -551,8 +590,11 @@ class Child {
     if (!Shell.WINDOWS) {
       pid = System.getenv().get("JVM_PID");
     }
-    JvmContext context = new JvmContext(jvmId, pid);    
-
+    JvmContext context = new JvmContext(jvmId, pid);
+    int idleLoopCount = 0;
+    Task task = null;
+    
+    UserGroupInformation childUGI = null;
    // Child.jvmContext = context;
     jvmContext = context;
     //这样设计只能统计一个进程的数据读写数据。
@@ -580,6 +622,7 @@ class Child {
 	  // This assumes that on return from Task.run() 
 	  // there is no more logging done.  
 	  LogManager.shutdown();	  
+	  LOG.info("child System.exit(0)");
 	  System.exit(0);    
   }
 

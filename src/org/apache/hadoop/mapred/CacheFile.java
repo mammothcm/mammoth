@@ -2,6 +2,7 @@ package org.apache.hadoop.mapred;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -9,7 +10,6 @@ import java.util.List;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.mapred.TaskAttemptID;
 import org.apache.hadoop.mapred.CachePool.CachePoolFullException;
 import org.apache.hadoop.mapred.CachePool.CacheUnit;
 
@@ -17,6 +17,7 @@ import org.apache.hadoop.mapred.CachePool.CacheUnit;
 public class CacheFile extends InputStream {	
 	private static final Log LOG = LogFactory.getLog(CacheFile.class.getName());
 	private List<CacheUnit> content;
+	private List<CacheUnit> rcontent;
 	private final CachePool pool;
 	private CacheUnit curCU = null;
 	private long cursor = 0; //for read
@@ -25,51 +26,50 @@ public class CacheFile extends InputStream {
 	private boolean isWriteDone = false;	 
 	
 	int maxSpills = 0;
+	//private List<CacheUnit> spills = new LinkedList<CacheUnit>();
 	FSDataOutputStream output;
-	boolean isAsyn = false;
 	private TaskAttemptID taskid;
 	private static long DEFAULTRLENGTH = 0;
 	private long rlen = 0;
 	
-	public CacheFile(CachePool p, long rlength) throws IOException {
-		this(p, rlength, null, false, null, -1);		
-	}
-	public CacheFile(FSDataOutputStream out, boolean asyn) throws IOException {
-		this(CachePool.get(), DEFAULTRLENGTH, out, asyn, null, -1);
+	CacheFile(CachePool p, long rlength) throws IOException {
+		this(p, rlength, null, false, null, -1);				
 	}
 	CacheFile(CachePool p, long rlength, FSDataOutputStream out, boolean asyn, 
 			TaskAttemptID tid, int priority) throws IOException{
-		if (rlength == DEFAULTRLENGTH) {
+		if (rlength != DEFAULTRLENGTH) {
+			rlength = size2Cap(rlength);
 			content = new ArrayList<CacheUnit>((int)(rlength / CacheUnit.cap) + 1);
+			rcontent = new ArrayList<CacheUnit>((int)(rlength / CacheUnit.cap) + 1);
+			rcontent.addAll(p.getUnits((int)(rlength/CacheUnit.cap)));
 		} else {
 			content = new LinkedList<CacheUnit>();
+			rcontent = new LinkedList<CacheUnit>();
 		}		
 		rlen = rlength;
 		pool = p;
 		output = out;		
 		taskid = tid;		
-		isAsyn = asyn;			
-		if (isAsyn) {
-			if (output == null) {
-				throw new IOException("asynchronized write outputstream null!");
-			}
-			SpillScheduler.get().registerSpill(output, priority);
-		}
 	}
-	public synchronized void write(byte b[], int off, int length) throws CachePoolFullException, InterruptedException {
+	private CacheUnit getUnit() throws CachePoolFullException {
+		if (rcontent.size() != 0) {
+			return rcontent.remove(0);
+		} else {
+			rlen += CacheUnit.cap;
+			return pool.getUnit();
+		}		
+	}
+	public void write(byte b[], int off, int length) throws CachePoolFullException, InterruptedException {
 				
 		if (curCU == null) {
-			curCU = pool.getUnit();
+			curCU = getUnit(); 
 			content.add(curCU);
 		}		 
 		int m = length;
 		while (m > 0) {
 			int res = curCU.write(b, off + length - m, m);
 			if (res < m) {
-				if (isAsyn) {
-					SpillScheduler.get().addSpill(output, curCU);					
-				}
-				curCU = pool.getUnit();
+				curCU = getUnit();
 				content.add(curCU);
 			}
 			len += res;
@@ -77,9 +77,9 @@ public class CacheFile extends InputStream {
 		}			
 	}	
 	
-	public synchronized int write(InputStream in) throws IOException {
+	public int write(InputStream in) throws IOException {
 		if (curCU == null) {
-			curCU = pool.getUnit();
+			curCU = getUnit();
 			content.add(curCU);
 		}	
 		int res = 0;
@@ -87,7 +87,7 @@ public class CacheFile extends InputStream {
 		while(true) {
 			res = curCU.write(in);
 			if (res == 0) {				
-				curCU = pool.getUnit();
+				curCU = getUnit();
 				content.add(curCU);
 				continue;
 			} else if (res < 0) {
@@ -102,16 +102,13 @@ public class CacheFile extends InputStream {
 		}
 		return total;
 	}
-	public synchronized void write(int b) throws IOException, InterruptedException {
+	public void write(int b) throws IOException, InterruptedException {
 		if (curCU == null) {
-			curCU = pool.getUnit();
+			curCU = getUnit();
 			content.add(curCU);
 		}		
 		if (!curCU.write(b)) {
-			if (isAsyn) {
-				SpillScheduler.get().addSpill(output, curCU);
-			}
-			curCU = pool.getUnit();
+			curCU = getUnit();
 			content.add(curCU);						
 			if (curCU.write(b)) {
 				len++;
@@ -126,7 +123,7 @@ public class CacheFile extends InputStream {
 		delete = d;
 	}
 	@Override
-	public synchronized int read() throws IOException {
+	public int read() throws IOException {
 		// TODO Auto-generated method stub
 		if (cursor >= len) {
 			return -1;
@@ -137,7 +134,7 @@ public class CacheFile extends InputStream {
 		}				
 	}
 	
-	public synchronized int read(byte b[], int off, int length) {
+	public int read(byte b[], int off, int length) {
 		if (b == null) {
 	    throw new NullPointerException();
 		} else if (off < 0 || length < 0 || length > b.length - off) {
@@ -180,7 +177,8 @@ public class CacheFile extends InputStream {
 			m -= tm;
 			cursor += tm;
 		}		
-
+	//	LOG.info("skip content size: " + content.size() + ", len: " + len 
+	//			+ ", cursor: " + cursor + ", n: " + n + ", m: " + m);
 		return n - m;
 	}
 	public void close() {       //for read
@@ -200,7 +198,9 @@ public class CacheFile extends InputStream {
  	}
 	public void clear() {       
 		pool.returnUnit(content);
+		pool.returnUnit(rcontent);
 		content.clear();
+		rcontent.clear();
 		len = 0;
 		cursor = 0;
 	}
@@ -208,24 +208,14 @@ public class CacheFile extends InputStream {
 		return isWriteDone;
 	}
 	public void closeWrite() throws IOException, InterruptedException {		
+		if ((len == 0 && curCU == null)) {
+			isWriteDone = true;
+		}
 		if (isWriteDone) {
 			return;
 		}
 		isWriteDone = true;
-		curCU.setLast();
-		if (isAsyn) {						
-			SpillScheduler.get().addSpill(output, curCU);
-			try {
-				SpillScheduler.get().waitSpillFinished(output);
-				output.close();
-			} catch (InterruptedException e) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-			}
-			SpillScheduler.get().unRegisterSpill(output);
-			LOG.info(taskid + " close write done!");
-			content.clear();
-		}		
+		curCU.setLast();	
 	}
 	public long getLen() {		
 		return len;

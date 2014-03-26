@@ -3,7 +3,8 @@ package org.apache.hadoop.mapred;
 import java.io.InputStream;
 
 abstract class ReduceRamManager implements RamManager{
-	static long maxSize = 0;
+	protected long maxSize = 0;
+	protected long toSpillSize = -1;
 //	static long sortLimit = 0;
 	/**
    * Reserve memory for data coming through the given input-stream.
@@ -24,20 +25,21 @@ abstract class ReduceRamManager implements RamManager{
    */
   abstract void unreserve(long requestedSize);
   
- // void spill2Disk(int size);
+  abstract long getTotalShuffleSize();
+  
+  abstract long getSpilledSize();
   
   abstract TaskAttemptID getTaskId();
+  
+  abstract boolean isClosed();
 
 	abstract void merge2Disk(boolean memOrDisk, long size);
 	
-	static void setMaxMem(long l) {
+	public void setMaxMem(long l) {
 		maxSize = l;
-	}	
-/*	static void setSortLimitMem(long size) {
-		sortLimit = size;
 	}
-	static void setLimit(long max, long sortMax) {
-		maxSize = max;
-		//sortLimit = sortMax;
-	}*/
+	public void set2SpillSize(long l) {
+		toSpillSize = l;
+	}	
+	abstract public long getDesiredSize();
 }

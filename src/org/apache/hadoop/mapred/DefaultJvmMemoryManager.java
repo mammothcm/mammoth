@@ -4,13 +4,18 @@ import static org.apache.hadoop.mapred.Task.Counter.COMBINE_INPUT_RECORDS;
 import static org.apache.hadoop.mapred.Task.Counter.COMBINE_OUTPUT_RECORDS;
 import static org.apache.hadoop.mapred.Task.Counter.MAP_OUTPUT_BYTES;
 import static org.apache.hadoop.mapred.Task.Counter.MAP_OUTPUT_MATERIALIZED_BYTES;
+
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -19,23 +24,32 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.BytesWritable;
+import org.apache.hadoop.io.DataInputBuffer;
+import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.WritableUtils;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.DefaultCodec;
 import org.apache.hadoop.mapred.CachePool.CacheUnit;
+import org.apache.hadoop.mapred.IFile.InMemoryReader;
 import org.apache.hadoop.mapred.IFile.Reader;
 import org.apache.hadoop.mapred.IFile.Writer;
+import org.apache.hadoop.mapred.MemoryElement.MemoryElementFullException;
 import org.apache.hadoop.mapred.Merger.Segment;
+
 import org.apache.hadoop.mapred.Task.CombineOutputCollector;
 import org.apache.hadoop.mapred.Task.CombinerRunner;
 import org.apache.hadoop.mapred.Task.Counter;
 import org.apache.hadoop.mapred.Task.TaskReporter;
+import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 
-
-public class DefaultJvmMemoryManager{	
+//默认的jvm manager 采用内存池方式
+public class DefaultJvmMemoryManager implements JvmMemoryManager{
+	//static final int MEMORY_BLOCK_SIZE = 4*1024*1024;  //默认每个块为4M
+	
 	class DefaultMapRamManager implements MapRamManager{
 		class MapReserveElement {
 			MapReserveElement(TaskAttemptID tid) {
@@ -105,6 +119,8 @@ public class DefaultJvmMemoryManager{
 			}
 		}
 		public void await() throws InterruptedException{
+			LOG.info("await");
+			LOG.info("waitMRE num : " + waitMREs.size());
 			try {
 				crm.getReserveLock().lock();
 				mapREs.get(curReserveID).waitCond.await();
@@ -113,6 +129,8 @@ public class DefaultJvmMemoryManager{
 			}
 		}
 		public void awake() {						
+			LOG.info("awake");
+			LOG.info("waitMRE num : " + waitMREs.size());
 			waitMREs.remove(mapREs.get(scheduledTask));
 			mapREs.get(scheduledTask).waitTime = 0;
 			mapREs.get(scheduledTask).reserveSize = 0;
@@ -128,10 +146,12 @@ public class DefaultJvmMemoryManager{
 		public void reserve(TaskAttemptID tid, long requestedSize) 
 			throws InterruptedException {	
 			try {
+				long s = System.currentTimeMillis();
 				crm.getReserveLock().lock();
 				boolean isWait = crm.tryReserve(tid, ChildRamManager.BufType.spill, requestedSize);
 				MapReserveElement mre = mapREs.get(tid);
 				if(isWait) {
+					LOG.info("reserve wait 111");
 					curReserveID = tid;				
 					mre.reserveSize = requestedSize;				
 					mre.waitTime = 0;
@@ -150,9 +170,14 @@ public class DefaultJvmMemoryManager{
 						++numPendingRequests;
 						dataAvailable.notify();
 					}
+					LOG.info("reserve wait 111");
 				}
+				LOG.info("reserve 111");
 				crm.reserve(tid, ChildRamManager.BufType.spill, requestedSize);
-				if(isWait) {			
+				
+				LOG.info("reserve 222");
+				if(isWait) {				
+					LOG.info("reserve waite 222");
 					synchronized (dataAvailable) {
 						--numPendingRequests;					
 					}
@@ -162,12 +187,14 @@ public class DefaultJvmMemoryManager{
 				if (mre.maxSize < mre.reservedSize) {
 					mre.maxSize = mre.reservedSize;
 				}
+				LOG.info(tid + " map reserve : " + (System.currentTimeMillis() - s));
 			} finally {
 				crm.getReserveLock().unlock();
 			}
 		}
 		 
-		public void unreserve(TaskAttemptID tid,int num, long requestedSize) {
+		public void unreserve(TaskAttemptID tid,int num, long requestedSize) {			
+			LOG.info("unreserve 111");
 			crm.unreserve(ChildRamManager.BufType.spill, requestedSize);
 			synchronized (dataAvailable) {
 				numClosed -= num;
@@ -175,6 +202,8 @@ public class DefaultJvmMemoryManager{
 				fullSize -= requestedSize;
 			}			
 			mapREs.get(tid).reservedSize -= requestedSize;
+			LOG.info("unreserve requestedSize : " + requestedSize);
+			// Notify the threads blocked on RamManager.reserve			
 		}
 	 
 		
@@ -189,7 +218,7 @@ public class DefaultJvmMemoryManager{
 			}
 		}
 	 	 
-		//get to spill me nums
+		//得到处于spill状态的任务数
 		private int getSpillMapNum() {
 			int num = 0;
 			for(MapSpiller ms : mapSpillers.values()) {
@@ -204,6 +233,7 @@ public class DefaultJvmMemoryManager{
 		  synchronized (dataAvailable) {
 		  	// Start in-memory merge if manager has been closed or...
 		  isSpilling = false;
+	//	  crm.scheduleTask2Spill();
 		  	while( (
 		  			// In-memory threshold exceeded and at least two segments
 		  			// have been fetched
@@ -224,20 +254,33 @@ public class DefaultJvmMemoryManager{
 		  					numJvmSlots*MAX_STALLED_SPILL_THREADS_FRACTION) && 
 		  					(0 >= numRequiredMap ||
 		  					numPendingRequests < numRequiredMap)) ) || getSpillMapNum()==0){
-		  		dataAvailable.wait();   
-		  	}
+		  		dataAvailable.wait();
+		      
+		  		String s = "mapSpillers";
+		  		for(MapSpiller ms : mapSpillers.values()) {
+		  			s += " : " + ms.getReadySpillNum() + " , " + ms.getState();
+		  		}
+		  		LOG.info(s + ". percentUsed : " + crm.getPercentUsed() + " maxInMemSpills : " + maxInMemSpills
+		  				+ " numClosed : " + numClosed + " numRequiredMap : " + numRequiredMap 
+		  				+	" numPendingRequests : " + numPendingRequests + 
+		  				" waitingsMREs : " + waitMREs.size() + ", fullSize: " + fullSize);
+		  		}	
 		  	isScheduled2Spill = false;
 		  	isSpilling = true;
-		  }	  		  	  
+		  }	  
+		  	  
 		}
 
 		public void schedule() {
+			LOG.info("schedule 000");
 			if (waitMREs.size()==0) {
+				LOG.info("schedule 111");
 				scheduledTask = null;
 				return;
 			}
 			int maxWait = 0;
 			int maxInd = 0;
+			LOG.info("schedule 222");
 			for (int i = 0; i < waitMREs.size(); i++) {
 				MapReserveElement mre = waitMREs.get(i);
 				if(mre.waitTime > maxWait) {
@@ -245,11 +288,17 @@ public class DefaultJvmMemoryManager{
 					maxInd = i;
 				}
 			}
+			LOG.info("schedule 333");
 			if (maxWait > maxWaitTime) {
+				LOG.info("schedule 444");
 				scheduledTask = waitMREs.get(maxInd).taskId;
+				LOG.info("scheduledTask : " + scheduledTask);
 			} else {
+				LOG.info("schedule 555");
 				scheduledTask = waitMREs.get(0).taskId;
+				LOG.info("scheduledTask : " + scheduledTask);
 			}
+			LOG.info("scheduledTask : " + scheduledTask);
 		}
 
 		@Override
@@ -305,6 +354,7 @@ public class DefaultJvmMemoryManager{
 	enum MapState{spill, merge}
  	class MapSpiller<K,V> {
 		MapState state = MapState.spill;
+		//负责每个map的缓冲区溢出操作
 		private ArrayList<SpillRecord> indexCacheList;
 		private TaskAttemptID taskId;
 		private int numSpills = 0;
@@ -361,7 +411,21 @@ public class DefaultJvmMemoryManager{
 		public int getReadySpillNum() {
 			return bufList.size();
 		}
-
+	//	Object o = new Object();
+		public long writeFile(RawKeyValueIterator records, Writer<K, V> writer, 
+	                 Progressable progressable, Configuration conf) 
+	  throws IOException {
+	    long progressBar = conf.getLong("mapred.merge.recordsBeforeProgress",
+	        8192) -1;
+	    long recordCtr = 0;
+	    while(records.next()) {
+	      writer.append(records.getKey(), records.getValue());	      
+	      if (((recordCtr++) & progressBar) == 0 ) {
+	        progressable.progress();	         
+	      }	     
+	    }
+	    return recordCtr;
+		}
 		
 		private void mergeParts() throws IOException, InterruptedException, 
 		ClassNotFoundException {
@@ -370,6 +434,9 @@ public class DefaultJvmMemoryManager{
 			long finalIndexFileSize = 0;
 			final Path[] filename = new Path[numSpills];
 			final TaskAttemptID mapId = taskId;
+			
+			LOG.info(taskId + " mergeParts numSpills : " + numSpills 
+					+ " numSpilled : " + numSpilled + "bufList size : " + bufList.size());
 			for(int i = 0; i < numSpilled; i++) {
 				filename[i] = mapOutputFile.getSpillFile(i);
 				finalOutFileSize += rfs.getFileStatus(filename[i]).getLen();
@@ -401,8 +468,8 @@ public class DefaultJvmMemoryManager{
 			//The output stream for the final single output file
 			FSDataOutputStream finalFileOut = rfs.create(finalOutputFile, true, 4096);
 			long cfCap =  CacheFile.size2Cap(finalOutFileSize);
-			CacheFile finalCf = new CacheFile(CachePool.get(), cfCap ,finalFileOut, true, taskId, SpillScheduler.SORT);			
-			FSDataOutputStream finalOut = new FSDataOutputStream(new CacheOutputStream(finalCf), null);
+			//ramManager.reserve(taskId, cfCap);						
+			FSDataOutputStream finalOut = new FSDataOutputStream(new SpillOutputStream(CachePool.get(), cfCap ,finalFileOut, taskId, SpillScheduler.SORT), null);
 			if (numSpills == 0) {
 				//	create dummy files
 				IndexRecord rec = new IndexRecord();
@@ -438,9 +505,13 @@ public class DefaultJvmMemoryManager{
 							FSDataInputStream in =rfs.open(filename[i]);
 							int off = (int)indexRecord.startOffset;						
 							in.skip(off);
-					
+						//	Reader<K, V> reader = 
+						//			new InMemoryReader<K, V>(null, taskId,
+			      //                              buf, (int)indexRecord.startOffset, (int)indexRecord.partLength);
 							Reader<K, V> reader = new Reader(conf, in, (int)indexRecord.partLength);
-			        s = new Segment<K, V>(reader, true);			
+			        s = new Segment<K, V>(reader, true);
+					//		s =	new Segment<K,V>(conf, rfs, filename[i], indexRecord.startOffset,
+					//						indexRecord.partLength, codec, true);
 						} else {
 							int ind = i;
 							if (this.singleRecInds.size()!=0) {
@@ -457,19 +528,27 @@ public class DefaultJvmMemoryManager{
 								LOG.info(taskId + " mergePartsError!!! ");
 							}
 							CacheFile cf = this.bufList.get(ind);
+							//DataInputBuffer dib = new DataInputBuffer();
 							int off = (int)indexRecord.startOffset;							
 							cf.reset();
-							cf.skip(off);	
+							cf.skip(off);
+			//				LOG.info(taskId +", partition: " + parts + "ind: "+ ind +", off: " + off + ", partlength: " + 
+			//				indexRecord.partLength + ", rawLen: " + indexRecord.rawLength);
+						//	Reader<K, V> reader = 
+						//			new InMemoryReader<K, V>(null, taskId,
+			      //                              buf, (int)indexRecord.startOffset, (int)indexRecord.partLength);
 							Reader<K, V> reader = new Reader(conf, cf, (int)indexRecord.partLength);
 			        s = new Segment<K, V>(reader, true);
 						}
 						segmentList.add(i, s);
+
 						if (LOG.isDebugEnabled()) {
 							LOG.debug("MapId=" + mapId + " Reducer=" + parts +
 									"Spill =" + i + "(" + indexRecord.startOffset + "," +
 									indexRecord.rawLength + ", " + indexRecord.partLength + ")");
 						}
 					}
+
 					//		merge
 					@SuppressWarnings("unchecked")
 					RawKeyValueIterator kvIter = Merger.merge(conf, rfs,
@@ -484,19 +563,29 @@ public class DefaultJvmMemoryManager{
 							new Writer<K, V>(conf, finalOut, keyClass, valClass, codec,
 									spilledRecordsCounter);
 					if (combinerRunner == null || numSpills < minSpillsForCombine) {
+//						long s = System.currentTimeMillis();
 						rKVIter = kvIter;
-						Merger.writeFile(kvIter, writer, reporter, conf);
+						long t = writeFile(kvIter, writer, reporter, conf);
 						rKVIter = null;
+			//			LOG.info(taskId + " mergeParts Merger.writeFile time: " + (System.currentTimeMillis() - s)
+			//					+ ", count: " + t);
 					} else {
 						combineCollector.setWriter(writer);
 						combinerRunner.combine(kvIter, combineCollector);
 					}
-					writer.close();				
+
+				//	long s = System.currentTimeMillis();
+					//close
+					writer.close();
+					
+			//		LOG.info(taskId + " mergeParts writer.close : " + (System.currentTimeMillis() - s));
+					// 	record offsets
 					rec.startOffset = segmentStart;
 					rec.rawLength = writer.getRawLength();
 					rec.partLength = writer.getCompressedLength();
 					spillRec.putIndex(rec, parts);
 				}
+				LOG.info("spillRec.size: " + spillRec.size() + " partitions: " + partitions);
 				finalOut.close();
 				spillRec.writeToFile(finalIndexFile, conf);
 				
@@ -514,6 +603,13 @@ public class DefaultJvmMemoryManager{
 					rfs.delete(filename[ssi.intValue()],true);
 				}				
 			}
+		//	long s0 = System.currentTimeMillis();
+      //finalCf.writeFile(finalFileOut);
+			//finalCf.closeWrite();
+    //  LOG.info(taskId + " mergeFile spill time: " + (System.currentTimeMillis() - s0));
+      //ramManager.unreserve(taskId, 1, cfCap);
+      //finalCf.clear();
+      //finalOut.close();
 			Path outputPath = mapOutputFile.getOutputFile();
 	    fileOutputByteCounter.increment(rfs.getFileStatus(outputPath).getLen());	    
 		}
@@ -583,6 +679,7 @@ public class DefaultJvmMemoryManager{
 				return;
 			}
 			FSDataOutputStream out = null;
+			//		MemoryElementQueue meQ = spillThread.getCurrentQueue();
 			for (Integer ssi : this.singleRecInds) {
 				if (numSpilled < ssi.intValue()) {
 					break;
@@ -594,14 +691,19 @@ public class DefaultJvmMemoryManager{
 			}	
 			CacheFile cf;;
 			synchronized(bufList) {
+			//	LOG.info("bufList size : " + bufList.size());
 				cf = this.bufList.remove(0);
+				//LOG.info("bufList size : " + bufList.size());
 			}
 			LOG.info(taskId + " spill2Disk write begin ");
+	  	// create spill file		  	
 			long len = cf.getLen();
       final Path filename =
           mapOutputFile.getSpillFileForWrite(numSpilled, len);        
-      out = rfs.create(filename);
+      out = rfs.create(false, filename);
       cf.writeFile(out);        
+      //out.close();
+//			LOG.info("sortAndSpill ... 777");				
       LOG.info(taskId + " Finished spill to disk : " + numSpilled + " : " + len);
       numSpilled++;     	
       ramManager.unreserve(taskId, 1, cf.getCap());
@@ -610,25 +712,33 @@ public class DefaultJvmMemoryManager{
 		
 		private void sortAndSpill2Buffer() throws IOException, InterruptedException, ClassNotFoundException { //memEle内部已有序
 			FSDataOutputStream out = null;
+	//		MemoryElementQueue meQ = spillThread.getCurrentQueue();
 			MemoryElementQueue meQ = activeMemQueues.remove(taskId);
       try {
+      //	long s = System.currentTimeMillis();
       	int size =  meQ.getSpillFileSize();      	
       	if (size % CacheUnit.cap > 0) {
       		size -=  size % CacheUnit.cap;
       		size += CacheUnit.cap;
       	}
       	long cfLen = CacheFile.size2Cap(size);
-      	ramManager.reserve(taskId, cfLen);   
-        final SpillRecord spillRec = new SpillRecord(partitions);     
+      	ramManager.reserve(taskId, cfLen);
+      //	LOG.info(taskId + " sortAndSpill2BufferTime reserve : " + (System.currentTimeMillis() - s));
+        // create spill file
+        final SpillRecord spillRec = new SpillRecord(partitions);        
+        //byte[] buf = new byte[meQ.getSpillFileSize()];
         CacheFile cf = new CacheFile(CachePool.get(), cfLen);
         IndexRecord rec = new IndexRecord();
-        out = new FSDataOutputStream(new CacheOutputStream(cf), null);
-				List<Segment<K, V>> inMemorySegments = new ArrayList<Segment<K,V>>();			
+        out = rfs.create(cf);
+				List<Segment<K, V>> inMemorySegments = new ArrayList<Segment<K,V>>();				
+//				LOG.info("sortAndSpill ... 222");
 				for(int i = 0; i < partitions; i++) {
 					IFile.Writer writer = null;
+				//	LOG.info("mergePart inMemorySegments size : " + inMemorySegments.size());
 					inMemorySegments.clear();
 					meQ.createInMemorySegments(inMemorySegments);
 					meQ.setPartition(i);
+		//			LOG.info("sortAndSpill ... 111");
 					RawKeyValueIterator rIter = Merger.merge(conf, rfs,
 	            (Class<K>)conf.getMapOutputKeyClass(),
 	            (Class<V>)conf.getMapOutputValueClass(),
@@ -636,23 +746,32 @@ public class DefaultJvmMemoryManager{
 	            new Path(taskId.toString()),
 	            conf.getOutputKeyComparator(), reporter,
 	            spilledRecordsCounter, null);
-
+					
+			//		LOG.info("mergePart inMemSegs size : " + inMemorySegments.size());
 					try {
 						long segmentStart = out.getPos();
 						writer = new Writer(conf, out, keyClass, valClass);						
 						if (combinerRunner == null) {
+	//						LOG.info("sortAndSpill ... 333");
 							rKVIter = rIter;
-	            Merger.writeFile(rIter, writer, reporter, conf);
+	            writeFile(rIter, writer, reporter, conf);
 	            rKVIter = null;
+	  //          LOG.info("sortAndSpill ... 444");
 	          } else {
+//	          	LOG.info("sortAndSpill ... 555");
 	            combineCollector.setWriter(writer);
 	            combinerRunner.combine(rIter, combineCollector);
-
+//	            LOG.info("sortAndSpill ... 666");
 	          }
-	          writer.close();        	
+	          writer.close();        
+	
+	       // record offsets
             rec.startOffset = segmentStart;
             rec.rawLength = writer.getRawLength();
-            rec.partLength = writer.getCompressedLength();      
+            rec.partLength = writer.getCompressedLength();
+            //if (i == 1)
+           // LOG.info("partition : " + i + " startOffset : " + rec.startOffset + 
+            //		" rawLength : " + rec.rawLength +	" partLength : " + rec.partLength);
             spillRec.putIndex(rec, i);
             writer = null;
           } finally {
@@ -660,6 +779,7 @@ public class DefaultJvmMemoryManager{
 
           }
 				}
+	//			LOG.info("sortAndSpill ... 777");
 				if (totalIndexCacheMemory >= INDEX_CACHE_MEMORY_LIMIT) {
           // create spill index file
           Path indexFilename =
@@ -670,8 +790,11 @@ public class DefaultJvmMemoryManager{
           indexCacheList.add(spillRec);
           totalIndexCacheMemory +=
             spillRec.size() * MAP_OUTPUT_INDEX_RECORD_LENGTH;
-        }			
-				ramManager.closeInMemorySpill(size);
+        }
+		//		LOG.info("sortAndSpill2Buffer() 111");
+			
+					ramManager.closeInMemorySpill(size);
+		//		LOG.info("sortAndSpill2Buffer() 222");
 				synchronized(bufList) {
         	bufList.add(cf);
         }
@@ -684,7 +807,9 @@ public class DefaultJvmMemoryManager{
 		}
 		public void kill() {			
 			if (rKVIter != null) {				
+					LOG.info("kill rKVIter.stop() 0");
 					rKVIter.stop();
+					LOG.info("kill rKVIter.stop() 1");				
 			}
 			int total = 0;
 			for(CacheFile cf : bufList) {
@@ -706,7 +831,8 @@ public class DefaultJvmMemoryManager{
 		private Object free = new Object(); 
 		public boolean isBusy() {
 			return isBusy;
-		}		
+		}
+		
 		public void toSpillTaskRemoved(int i) {
 			if (i == -1) {
 				return;
@@ -725,9 +851,11 @@ public class DefaultJvmMemoryManager{
 		
 		public TaskAttemptID getCurrentSpillId() {
 			return currentQue;
-		}		
+		}
+		
 		
 		private TaskAttemptID getNextSpillQue() {			
+			//这样的同步顺序可以避免交叉死锁
 			synchronized (toSpillMemQInds) {
 				synchronized(index) {
 
@@ -739,7 +867,16 @@ public class DefaultJvmMemoryManager{
 							index.set((i + 1) % tNum);							
 							return tid;
 						}
-					}					
+					}
+					String s = "getNextSpillQue Null";
+					for (int i = index.get(); i < index.get() + tNum; i++) {				
+						s += " index : " + i;
+						TaskAttemptID tid = toSpillMemQInds.get(i%tNum);
+						s += " id : " + tid;
+						s += " spillNum : " + mapSpillers.get(tid).getReadySpillNum();
+						s += " state : " + mapSpillers.get(tid).getState(); 							
+					}
+					LOG.info(s);
 					return null;
 				}								
 			}
@@ -752,6 +889,7 @@ public class DefaultJvmMemoryManager{
 		public void run() {			
 			while (true) {					
 				try {	
+					LOG.info("spill thread wait!");
 					isBusy = false;
 					ramManager.waitForDataToSpill();
 					isBusy = true;
@@ -759,7 +897,9 @@ public class DefaultJvmMemoryManager{
 					Thread.currentThread().interrupt();
 					break;
 				}
-				currentQue = getNextSpillQue();		
+				currentQue = getNextSpillQue();
+				LOG.info("spill thread spill2Disk : " + currentQue);				
+				
 				try {					
 					if(currentQue == null || mapSpillers.get(currentQue).getState().compareTo(MapState.merge) == 0) {
 						continue;
@@ -767,7 +907,8 @@ public class DefaultJvmMemoryManager{
 					mapSpillers.get(currentQue).spill2Disk();
 					synchronized (free) {
 						free.notify();
-					}					
+					}
+					
 					currentQue = null;
 				} catch (Throwable t) {
 					String logMsg = "Task " + currentQue + " failed : " 
@@ -803,6 +944,9 @@ public class DefaultJvmMemoryManager{
 				startSpillQueue(this.taskId);
 				return;
 			}
+ //			if (memSize >= perQueToSpillDownLineMemSize && !spillThread.isBusy()){
+ //				startSpillQueue(this.taskId);
+	//		}
 		}
 		
 		public void startSpill() {
@@ -816,6 +960,7 @@ public class DefaultJvmMemoryManager{
 		}
 		
 		public void close2Recycle() {
+	//		LOG.info("recycle called");
 			for (MemoryElement me : this.memElementQueue) {
 				me.reset();	
 				recycleMemElement(me);			
@@ -873,21 +1018,21 @@ public class DefaultJvmMemoryManager{
 	private JobConf conf = null;
 	private int numJvmSlots;
 
-	//threadhold of spilling
-	private long perQueToSpillUpLineMemSize;
-	private int perQueToSpillUpLineMENum;   
-	
+	private long perQueToSpillUpLineMemSize;     //memory 数量，单位为byte   
+	//为了避免死锁
+	private int perQueToSpillUpLineMENum;       //MemoryElement的数量
 	private Map<TaskAttemptID, MemoryElementQueue> activeMemQueues = 
 			new ConcurrentHashMap<TaskAttemptID, MemoryElementQueue>();
-
+	//private Map<TaskAttemptID, List<MemoryElementQueue>> toSpillMemQueues = 
+	//		new HashMap<TaskAttemptID, List<MemoryElementQueue>>();	
 	private Map<TaskAttemptID, MapSpiller> mapSpillers = 
 			new ConcurrentHashMap<TaskAttemptID, MapSpiller>();
 	private List<TaskAttemptID> toSpillMemQInds =
-			new ArrayList<TaskAttemptID>();         //for polling 
+			new ArrayList<TaskAttemptID>();         //用于轮询各个任务
 	private SpillThread spillThread = new SpillThread();
 	
 	private List<MemoryElement> regMemElePool = new LinkedList<MemoryElement>();
-
+//	private List<MemoryElement> bigMemElePool = new ArrayList<MemoryElement>();
 				
 	private  int partitions;
 	private  FileSystem localFs;
@@ -897,18 +1042,26 @@ public class DefaultJvmMemoryManager{
 //Compression for map-outputs
   private CompressionCodec codec = null;
   private  int minSpillsForCombine;
-    
+  
+  
+//  private TaskAttemptID flushTaskId = null;
+  //private TaskAttemptID spillSingleRecTaskId = null;
+  //private TaskAttemptID mergeTaskId = null;
+  
   private final static int APPROX_HEADER_LENGTH = 150;
   private static final Log LOG = LogFactory.getLog(DefaultJvmMemoryManager.class.getName());
   
   private DefaultMapRamManager ramManager;
-
-	DefaultJvmMemoryManager() throws IOException {		
-				
+  
+  private long spillTime = 0;
+  private long mergeTime = 0;
+  private long spillWaitTime = 0;
+  private long poolWaitTime = 0;
+	DefaultJvmMemoryManager(int maxSlots) throws IOException {		
+		numJvmSlots = maxSlots;		
 	}
 	
 	private void initialize() throws IOException {
-		numJvmSlots = conf.getInt("mapred.tasktracker.map.tasks.maximum", 2);
 		final float recper = conf.getFloat("io.sort.record.percent",(float)0.05);
     final int regSortkb = conf.getInt("io.sort.element.kb", 1024);      
     long regSortSize = regSortkb << 10;  	
@@ -918,12 +1071,14 @@ public class DefaultJvmMemoryManager{
   	this.perQueToSpillUpLineMemSize =perQueToSpillUpLineMemSizemb << 20;  	
   
   	long regEleNum = (perQueToSpillUpLineMemSize / (int)((regSortSize) * (1 - recper)) + 2) * this.numJvmSlots;
+  	LOG.info("regEleNum : " + regEleNum);
   	perQueToSpillUpLineMENum = (int)regEleNum / this.numJvmSlots -1;    
     MemoryElement.initMemElements(recper, regSortkb, bigSortmb);    
     for (int i = 0; i < regEleNum; i++) {
     	this.regMemElePool.add(new MemoryElement(false));
     }    
     LOG.info("total regular pool size: " + regEleNum * regSortSize);
+    LOG.info("total jvm size: " + Runtime.getRuntime().maxMemory());
     long maxBufSize = conf.getLong("mapred.child.buf.total.bytes",
         Runtime.getRuntime().maxMemory() - regEleNum * regSortSize);
     float maxBufUsePer = conf.getFloat("mapred.child.buf.percent", 0.7f);
@@ -932,6 +1087,9 @@ public class DefaultJvmMemoryManager{
     int cacheUnitCap = conf.getInt("mapred.cache.unit.kb", 2048) << 10;
     CachePool.init(maxTotal, cacheUnitCap);
     ramManager = new DefaultMapRamManager(conf, ChildRamManager.get());
+  /*  for (int i = 0; i < bigEleNum; i++) {
+    	this.bigMemElePool.add(new MemoryElement(true));
+    }*/
     spillThread.setDaemon(true);
     spillThread.setName("SpillThread");    
     spillThread.start();    
@@ -961,10 +1119,13 @@ public class DefaultJvmMemoryManager{
 	}
 	
 	public MemoryElement getRegMemoryElement() {
+		//LOG.info("getRegMemoryElement !!");
 		synchronized (regMemElePool) {			
 			while (regMemElePool.size() == 0) {				
 					try {						
+						long s = System.currentTimeMillis();
 						regMemElePool.wait();
+						poolWaitTime += System.currentTimeMillis()-s;		
 					} catch (InterruptedException e) {
 						// TODO Auto-generated catch block
 						e.printStackTrace();
@@ -993,7 +1154,9 @@ public class DefaultJvmMemoryManager{
 		meq = this.activeMemQueues.get(tid);
 		meq.startSpill();		
 		try {			
-			mapSpillers.get(tid).sortAndSpill2Buffer();			
+			long s = System.currentTimeMillis();
+			mapSpillers.get(tid).sortAndSpill2Buffer();
+			LOG.info(tid + " sortAndSpill2BufferTime : " + (System.currentTimeMillis() - s));
 		} catch (Throwable t) {
 			String logMsg = "Task " + tid + " failed : " 
 					+ StringUtils.stringifyException(t);
@@ -1034,36 +1197,58 @@ public class DefaultJvmMemoryManager{
 	}
 	public void registerSpiller(JobConf job, TaskAttemptID tid, 
 			TaskReporter reporter) throws ClassNotFoundException {
+		//synchronized (this.mapSpillers) {
 			this.mapSpillers.put(tid, new MapSpiller(job, tid, reporter));
 			synchronized (this.toSpillMemQInds) {
 				this.toSpillMemQInds.add(tid);
 			}
 			this.ramManager.registerMap(tid);
+		//}
 	}
 	public void spillSingleRecord(TaskAttemptID tid, final Object key, final Object value,
-      int partition) throws IOException, InterruptedException {		
+      int partition) throws IOException, InterruptedException {
+		
+		LOG.info("spillSingleRecord : " + tid);		
 		mapSpillers.get(tid).spillSingleRecord(key, value, partition);				
 	}
 	
 	public void flush(TaskAttemptID tid) 
 			throws InterruptedException, IOException, ClassNotFoundException {
+		
+		LOG.info(tid+" flush 000");
 		if (this.activeMemQueues.get(tid) != null) {
 			startSpillQueue(tid);
 		}	
+		LOG.info(tid + " flush 444");		
 		if (spillThread.isBusy() && tid.equals(spillThread.getCurrentSpillId())) {
+			LOG.info("flush : spillThread.waitForFree : " + tid);
 			spillThread.waitForFree();
 		}
 		mapSpillers.get(tid).setState(MapState.merge);		
+		LOG.info(tid + " flush 111");
+		long s = System.currentTimeMillis();
 		mapSpillers.get(tid).mergeParts();
 		if (mapSpillers.get(tid).isKilled) {
 			return;
 		}
+		LOG.info(tid + " mergeParts time : " + (System.currentTimeMillis() - s));
+		LOG.info(tid + " flush 222");
 		synchronized (this.toSpillMemQInds) {			
 			spillThread.toSpillTaskRemoved(this.toSpillMemQInds.indexOf(tid));				
 			this.toSpillMemQInds.remove(tid);		
 		}
+		LOG.info(tid + "flush 333");
 		this.mapSpillers.remove(tid);
 		this.ramManager.unregisterMap(tid);						
+		if (tid.toString().substring(32, 34).equals("33"))
+			LOG.info("cm %%%%%%%%%%%%% : totalSpillTime : " + spillTime + " totalMergeTime : " + mergeTime
+					+ " totalSpillWaitTime : " + spillWaitTime + " totalPoolWaitTime : " + poolWaitTime);
+		LOG.info("cm ************* flush executed" + tid);
+		/*
+		if (mapSpillers.size() == 0) {
+			System.exit(0);
+		}
+		*/
 	}	
 	public void kill(TaskAttemptID tid) {
 		if (!mapSpillers.containsKey(tid)) {

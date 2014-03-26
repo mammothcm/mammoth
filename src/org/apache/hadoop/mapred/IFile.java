@@ -490,9 +490,11 @@ class IFile {
         decompressor = null;
       }
       
-      // Close the underlying stream 
+      // Close the underlying stream
+    //  Log.info("reader close ramManager");
       if (ramManager != null && in instanceof CacheFile) {      	
       	long cap = ((CacheFile)in).getCap();
+      //	Log.info("cap: " + cap);
       	((CacheFile)in).clear();
       	ramManager.unreserve(cap);      	
       }
@@ -639,6 +641,7 @@ class IFile {
   	public boolean next(DataInputBuffer key, DataInputBuffer value) throws IOException {
   		try {
   		// Sanity check
+  		//	Log.info("next 11111111111111");
         if (eof) {
               throw new EOFException("Completed reading " + bytesRead);
         }

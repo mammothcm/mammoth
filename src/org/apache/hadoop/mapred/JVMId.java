@@ -35,6 +35,7 @@ class JVMId extends ID {
   
   public JVMId(JobID jobId, int id) {
     super(id);
+   // this.isMap = isMap;
     this.jobId = jobId;
   }
   

@@ -815,13 +815,14 @@ abstract public class Task implements Writable, Configurable {
      
      if (resourceCalculator == null) {
        return;
-     }   
-     ProcResourceValues res = resourceCalculator.getProcResourceValues();
-     long cpuTime = res.getCumulativeCpuTime();
-     long pMem = res.getPhysicalMemorySize();
-     long vMem = res.getVirtualMemorySize();
+     }
+     //xiexu:
+     //ProcResourceValues res = resourceCalculator.getProcResourceValues();
+     long cpuTime = 10;// res.getCumulativeCpuTime();
+     long pMem = 10;//res.getPhysicalMemorySize();
+     long vMem = 10;//res.getVirtualMemorySize();
      // Remove the CPU time consumed previously by JVM reuse
-     cpuTime -= initCpuCumulativeTime;
+     //cpuTime -= initCpuCumulativeTime;
      counters.findCounter(Counter.CPU_MILLISECONDS).setValue(cpuTime);
      counters.findCounter(Counter.PHYSICAL_MEMORY_BYTES).setValue(pMem);
      counters.findCounter(Counter.VIRTUAL_MEMORY_BYTES).setValue(vMem);

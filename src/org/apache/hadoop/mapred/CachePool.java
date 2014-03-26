@@ -4,7 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-
+import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -15,13 +15,13 @@ public class CachePool {
 		}
 	}	
 	public static class CacheUnit extends ByteArrayInputStream {		
-		public static int cap = 0;		
+		static int cap = 0;		
 		private boolean isLast = false;
 		public CacheUnit() {			
 			super(new byte[cap]);			
 			count = 0;
 		}
-		public synchronized int write(InputStream in) throws IOException {
+		public int write(InputStream in) throws IOException {
 			if (count >= buf.length) {
 				return 0;
 			}
@@ -32,7 +32,7 @@ public class CachePool {
 			count += res;
 			return res;
 		}
-		public synchronized int write(byte b[], int off, int len){
+		public int write(byte b[], int off, int len){
 			len = Math.min(len, buf.length - count);			
 			System.arraycopy(b, off, buf, count, len);
 			count += len;
@@ -41,7 +41,7 @@ public class CachePool {
 		public void writeFile(OutputStream out) throws IOException {
 			out.write(buf, mark, count);
 		}
-		public synchronized boolean write(int b){
+		public boolean write(int b){
 			if (count >= buf.length) {
 			    return false;
 			}
@@ -83,6 +83,25 @@ public class CachePool {
 		} 
 		return cp;
 	}
+	public synchronized List<CacheUnit> getUnits(int num) throws CachePoolFullException {
+		List<CacheUnit> res = new ArrayList<CacheUnit>(num);
+		if (pool.size() >= num) {
+			busyNum += num;
+			res.addAll(pool.subList(0, num));
+			pool.subList(0, num).clear();
+			return res;			
+		} else if ((busyNum + pool.size()) * CacheUnit.cap >= upLine){
+			throw new CachePoolFullException("current cache size " + (busyNum * CacheUnit.cap) 
+					+ " exceed upline " + upLine);
+		} else {
+			busyNum += num;
+			for (int i = 0; i < num; i++) {
+				res.add(new CacheUnit());
+			}
+			return res;
+		}	
+	}
+	
 	public synchronized CacheUnit getUnit() throws CachePoolFullException {
 		if (!pool.isEmpty()) {
 			busyNum++;
